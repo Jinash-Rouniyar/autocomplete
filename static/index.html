@@ -1,0 +1,433 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Autocomplete Engine</title>
+  <style>
+    :root{--bg:#0e1116;--panel:#0f141a;--ink:#e6edf3;--muted:#9fb3c8;--acc:#00ffa3;--edge:#203040;--ghost:#6fffc0;}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 ui-monospace,Menlo,Consolas,monospace}
+    header{padding:16px 20px;border-bottom:1px solid #1b2430;display:flex;gap:12px;align-items:center}
+    .title{font-weight:800;letter-spacing:.5px;color:var(--acc)}
+    .pill{font-size:12px;padding:4px 8px;border:1px solid #244;border-radius:999px;color:var(--muted)}
+    main{max-width:980px;margin:20px auto;padding:0 20px;display:grid;gap:16px}
+    .card{background:var(--panel);border:1px solid var(--edge);border-radius:10px}
+    .section{padding:14px;border-bottom:1px solid #19202a}.section:last-child{border-bottom:none}
+    .label{color:var(--muted);text-transform:uppercase;font-size:12px;letter-spacing:.12em;margin-bottom:6px}
+    #suggestions{min-height:40px;white-space:pre-wrap;color:var(--ghost);display:none}
+    #meta{font-size:12px;color:#a7c1d9;margin-top:6px}
+    textarea{width:100%;min-height:240px;resize:vertical;border:none;outline:none;background:transparent;color:var(--ink);font:inherit}
+    .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    .select, .btn{background:#0b0f15;border:1px solid #1c2a36;color:#cde;padding:6px 8px;border-radius:8px;font:inherit}
+    .hint{color:#9fb3c8;font-size:12px}.kbd{border:1px solid #2a3b52;padding:2px 6px;border-radius:6px;color:#bfe}
+    .status{color:#ffa500;font-size:12px;margin-top:8px}
+    .status.error{color:#ff4444}
+    .status.success{color:#00ffa3}
+    /* Editor + ghost overlay (Cursor-style) */
+    .editor-wrap{
+      position:relative; 
+      width:100%;
+      min-height:540px;
+    }
+    #ghost, #editor{
+      font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;
+      white-space:pre-wrap;
+      word-break:break-word;
+      tab-size:2;
+      letter-spacing:0;
+      padding:12px;
+    }
+    #ghost{
+      position:absolute; inset:0;
+      color:transparent;        
+      pointer-events:none;
+      overflow:auto;
+    }
+    #ghost .typed{ color: transparent; }
+    #ghost .ghost{ color: var(--ghost); opacity:.88; }
+    #editor{
+      position:relative;
+      width:100%;
+      background:transparent;
+      color:var(--ink);
+      border:none; outline:none;
+      resize:vertical;
+    }
+    .editor-wrap .frame{
+      border:1px solid var(--edge);
+      border-radius:10px;
+      background:var(--panel);
+    }
+    .suggestion-list{
+      max-height:200px;
+      overflow-y:auto;
+      margin-top:8px;
+      border:1px solid var(--edge);
+      border-radius:8px;
+      padding:8px;
+      background:var(--bg);
+    }
+    .suggestion-item{
+      padding:6px 8px;
+      cursor:pointer;
+      border-radius:4px;
+      margin-bottom:4px;
+    }
+    .suggestion-item:hover{
+      background:var(--edge);
+    }
+    .suggestion-item.selected{
+      background:var(--acc);
+      color:var(--bg);
+    }
+    .suggestion-text{font-weight:600}
+    .suggestion-meta{font-size:11px;opacity:0.7;margin-top:2px}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">Autocomplete Engine</div>
+    <div class="pill">Trie + AST Analysis</div>
+    <div class="pill">Press <span class="kbd">Tab</span> to accept</div>
+  </header>
+
+  <main>
+    <div class="card">
+      <div class="section">
+        <div class="row">
+          <label class="hint">Language</label>
+          <select id="langSel" class="select">
+            <option value="python" selected>Python</option>
+            <option value="typescript">TypeScript</option>
+            <option value="javascript">JavaScript</option>
+          </select>
+          <button class="btn" onclick="showIndexDialog()">Index Codebase</button>
+        </div>
+        <div id="status" class="status"></div>
+      </div>
+      <div class="section">
+        <div class="label">Code Editor</div>
+        <div class="editor-wrap frame">
+          <pre id="ghost"><span class="typed"></span><span class="ghost"></span></pre>
+          <textarea id="editor" placeholder="Type your code here...&#10;&#10;Example:&#10;def hello():&#10;    pri"></textarea>
+        </div>
+        <div>
+          <div id="meta"></div>
+        </div>
+        <div id="suggestion-list" class="suggestion-list" style="display:none"></div>
+        <div class="hint">Press <span class="kbd">Tab</span> to accept • <span class="kbd">Esc</span> to dismiss • Autocomplete updates as you type.</div>        
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const API_BASE = "http://localhost:8000/api";
+    const API_AUTOCOMPLETE = `${API_BASE}/autocomplete`;
+    const API_STREAM = `${API_BASE}/autocomplete_stream`;
+    const API_INDEX = `${API_BASE}/index`;
+    const API_STATS = `${API_BASE}/stats`;
+    
+    const editor = document.getElementById('editor');
+    const ghost = document.getElementById('ghost');
+    const gTyped = ghost.querySelector('.typed');
+    const gGhost = ghost.querySelector('.ghost');
+    const meta = document.getElementById('meta');
+    const status = document.getElementById('status');
+    const langSel = document.getElementById('langSel');
+    const suggestionList = document.getElementById('suggestion-list');
+    
+    let controller = null;
+    let completion = "";
+    let suggestions = [];
+    let selectedIndex = 0;
+    
+    function escapeHTML(s){
+      return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+    
+    function getCursorPosition(text, cursor) {
+      const before = text.slice(0, cursor);
+      const lines = before.split('\n');
+      return {
+        line: lines.length,
+        column: lines[lines.length - 1].length + 1
+      };
+    }
+    
+    function debounce(fn, ms=300){ 
+      let t; 
+      return (...a)=>{ 
+        clearTimeout(t); 
+        t=setTimeout(()=>fn(...a), ms); 
+      }; 
+    }
+    
+    function syncOverlay(){
+      const val = editor.value;
+      const cur = editor.selectionStart;
+      gTyped.innerHTML = escapeHTML(val);
+      gGhost.innerHTML = escapeHTML(completion);
+      ghost.scrollTop = editor.scrollTop;
+      ghost.scrollLeft = editor.scrollLeft;
+    }
+    
+    editor.addEventListener('scroll', ()=>{
+      ghost.scrollTop = editor.scrollTop;
+      ghost.scrollLeft = editor.scrollLeft;
+    });
+    
+    function updateSuggestionsUI(sugs) {
+      suggestions = sugs;
+      if (sugs.length === 0) {
+        suggestionList.style.display = 'none';
+        return;
+      }
+      
+      suggestionList.style.display = 'block';
+      suggestionList.innerHTML = sugs.map((sug, idx) => `
+        <div class="suggestion-item ${idx === selectedIndex ? 'selected' : ''}" 
+             onclick="selectSuggestion(${idx})"
+             onmouseenter="selectedIndex=${idx}; updateSuggestionsUI(suggestions)">
+          <div class="suggestion-text">${escapeHTML(sug.text)}</div>
+          <div class="suggestion-meta">${sug.type} • score: ${sug.score.toFixed(2)}</div>
+        </div>
+      `).join('');
+    }
+    
+    window.selectSuggestion = function(idx) {
+      if (idx >= 0 && idx < suggestions.length) {
+        const sug = suggestions[idx];
+        const cur = editor.selectionStart;
+        const before = editor.value.slice(0, cur);
+        const after = editor.value.slice(cur);
+        const prefix = getCurrentPrefix();
+        const newText = before.slice(0, -prefix.length) + sug.text + after;
+        editor.value = newText;
+        const newPos = before.length - prefix.length + sug.text.length;
+        editor.setSelectionRange(newPos, newPos);
+        completion = "";
+        suggestions = [];
+        suggestionList.style.display = 'none';
+        syncOverlay();
+        requestAutocomplete();
+      }
+    };
+    
+    function getCurrentPrefix() {
+      const cur = editor.selectionStart;
+      const before = editor.value.slice(0, cur);
+      const lines = before.split('\n');
+      const currentLine = lines[lines.length - 1];
+      
+      // Find the start of the current identifier
+      let start = currentLine.length - 1;
+      while (start >= 0 && (currentLine[start].match(/[a-zA-Z0-9_]/))) {
+        start--;
+      }
+      return currentLine.slice(start + 1);
+    }
+    
+    async function requestAutocomplete(){
+      const code = editor.value;
+      const cursor = editor.selectionStart;
+      const pos = getCursorPosition(code, cursor);
+      const prefix = getCurrentPrefix();
+      
+      if (!prefix || prefix.length < 1) {
+        completion = "";
+        suggestions = [];
+        suggestionList.style.display = 'none';
+        syncOverlay();
+        meta.textContent = "";
+        return;
+      }
+      
+      if (controller) controller.abort();
+      controller = new AbortController();
+      
+      completion = "";
+      syncOverlay();
+      meta.textContent = "Loading...";
+      
+      const body = {
+        code: code,
+        prefix: prefix,
+        language: langSel.value,
+        cursor_line: pos.line,
+        cursor_column: pos.column,
+        max_results: 10,
+        include_context: true
+      };
+      
+      const tStart = performance.now();
+      
+      try {
+        const res = await fetch(API_AUTOCOMPLETE, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        
+        const data = await res.json();
+        const totalMs = Math.round(performance.now() - tStart);
+        
+        if (data.suggestions && data.suggestions.length > 0) {
+          // Use first suggestion as completion preview
+          completion = data.suggestions[0].text.slice(prefix.length);
+          updateSuggestionsUI(data.suggestions);
+          
+          meta.textContent = `Found ${data.suggestions.length} suggestions • ${totalMs}ms • Scope: ${data.context?.scope || 'module'}`;
+        } else {
+          completion = "";
+          suggestions = [];
+          suggestionList.style.display = 'none';
+          meta.textContent = `No suggestions found • ${totalMs}ms`;
+        }
+        
+        syncOverlay();
+      } catch (e){
+        if (e.name !== "AbortError"){
+          console.error(e);
+          status.textContent = `Error: ${e.message}`;
+          status.className = "status error";
+          meta.textContent = "";
+          completion = "";
+          suggestions = [];
+          suggestionList.style.display = 'none';
+          syncOverlay();
+        }
+      }
+    }
+    
+    const debounced = debounce(requestAutocomplete, 300);
+    
+    editor.addEventListener('input', ()=>{ 
+      debounced(); 
+      syncOverlay(); 
+      selectedIndex = 0;
+    });
+    editor.addEventListener('keyup', ()=> syncOverlay());
+    editor.addEventListener('click', ()=> {
+      syncOverlay();
+      requestAutocomplete();
+    });
+    
+    // Handle Tab and navigation when the editor has focus
+    editor.addEventListener('keydown', (e)=>{
+      if (e.key === 'Tab') {
+        // Always keep focus in the editor; don't let the browser move focus
+        e.preventDefault();
+
+        // If we have explicit suggestions, accept the selected one
+        if (suggestions.length > 0 && selectedIndex >= 0) {
+          selectSuggestion(selectedIndex);
+          return;
+        }
+
+        // If we have a ghost completion preview, accept it
+        if (completion) {
+          const cur = editor.selectionStart;
+          const before = editor.value.slice(0, cur);
+          const after = editor.value.slice(cur);
+          const prefix = getCurrentPrefix();
+          editor.value = before.slice(0, -prefix.length) + completion + prefix + after;
+          const newPos = (before + completion + prefix).length;
+          editor.setSelectionRange(newPos, newPos);
+          completion = "";
+          suggestions = [];
+          suggestionList.style.display = 'none';
+          syncOverlay();
+          debounced();
+          return;
+        }
+
+        // Fallback: insert indentation (4 spaces) when no suggestion is available
+        const cur = editor.selectionStart;
+        const before = editor.value.slice(0, cur);
+        const after = editor.value.slice(cur);
+        const indent = "    ";
+        editor.value = before + indent + after;
+        const newPos = before.length + indent.length;
+        editor.setSelectionRange(newPos, newPos);
+        syncOverlay();
+      } else if (e.key === 'Escape'){
+        completion = "";
+        suggestions = [];
+        suggestionList.style.display = 'none';
+        syncOverlay();
+      } else if (e.key === 'ArrowDown' && suggestions.length > 0) {
+        e.preventDefault();
+        selectedIndex = Math.min(selectedIndex + 1, suggestions.length - 1);
+        updateSuggestionsUI(suggestions);
+      } else if (e.key === 'ArrowUp' && suggestions.length > 0) {
+        e.preventDefault();
+        selectedIndex = Math.max(selectedIndex - 1, 0);
+        updateSuggestionsUI(suggestions);
+      } else if (e.key === 'Enter' && suggestions.length > 0 && selectedIndex >= 0) {
+        e.preventDefault();
+        selectSuggestion(selectedIndex);
+      }
+    });
+    
+    // Global key handler as an extra safety net: if the editor has focus,
+    // prevent Tab from moving focus anywhere else.
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab' && document.activeElement === editor) {
+        e.preventDefault();
+      }
+    });
+
+    async function checkStatus() {
+      try {
+        const res = await fetch(API_STATS);
+        if (res.ok) {
+          const stats = await res.json();
+          if (stats.unique_symbols > 0) {
+            status.textContent = `✓ Indexed: ${stats.files_indexed} files, ${stats.unique_symbols} symbols`;
+            status.className = "status success";
+          } else {
+            status.textContent = "⚠ No codebase indexed. Click 'Index Codebase' to get started.";
+            status.className = "status";
+          }
+        }
+      } catch (e) {
+        status.textContent = "⚠ Server not responding. Make sure the server is running.";
+        status.className = "status error";
+      }
+    }
+    
+    window.showIndexDialog = function() {
+      const path = prompt("Enter path to codebase directory to index:");
+      if (path) {
+        status.textContent = "Indexing... This may take a while.";
+        status.className = "status";
+        fetch(API_INDEX, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({directory: path})
+        })
+        .then(res => res.json())
+        .then(data => {
+          status.textContent = `✓ Indexed ${data.files_indexed} files, ${data.unique_symbols} symbols`;
+          status.className = "status success";
+          checkStatus();
+        })
+        .catch(e => {
+          status.textContent = `Error: ${e.message}`;
+          status.className = "status error";
+        });
+      }
+    };
+    
+    syncOverlay();
+    checkStatus();
+    setInterval(checkStatus, 5000);
+  </script>
+  
+</body>
+</html>
+
