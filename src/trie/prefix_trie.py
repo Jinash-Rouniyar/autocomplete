@@ -12,7 +12,6 @@ class PrefixTrie:
         self.root = TrieNode()
         self.case_sensitive = case_sensitive
         self._size = 0
-        # Cache for frequent prefix lookups
         self._prefix_cache: Dict[str, List[dict]] = {}
         self._cache_max_size = 100
         
@@ -133,7 +132,6 @@ class PrefixTrie:
         completions: List[dict] = []
         self._dfs_collect(node, prefix, completions, max_results, min_score)
         
-        # Sort by frequency/score (higher is better)
         completions.sort(key=lambda x: x.get("frequency", 0), reverse=True)
         
         result = completions[:max_results]
@@ -168,21 +166,17 @@ class PrefixTrie:
         if len(completions) >= max_results:
             return
         
-        # If this node marks the end of a word, add it
         if node.is_end:
             for completion in node.completions:
                 if len(completions) >= max_results:
                     return
                 
-                # Calculate score based on frequency
                 score = min(1.0, completion.get("frequency", 0) / 100.0)
                 if score >= min_score:
                     completion_copy = completion.copy()
                     completion_copy["score"] = score
                     completions.append(completion_copy)
         
-        # Recursively traverse all children
-        # Sort children for consistent ordering
         for char, child_node in sorted(node.children.items()):
             if len(completions) >= max_results:
                 return

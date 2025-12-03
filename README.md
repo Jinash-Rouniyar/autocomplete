@@ -2,6 +2,10 @@
 
 A high-performance autocomplete engine using prefix-based trie with DFS algorithms and AST analysis, similar to VSCode IntelliSense. Supports multiple languages (Python, TypeScript, JavaScript) with context-aware suggestions.
 
+## 🎥 Demo
+
+Watch a demo of the autocomplete engine in action: [Loom Video](https://www.loom.com/share/f4c52fbf6b344b818e33f81bf28e599f)
+
 ## Features
 
 - **Prefix-based Trie**: Efficient prefix matching with DFS traversal
