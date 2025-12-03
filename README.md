@@ -1,4 +1,4 @@
-# State-of-the-Art Autocomplete Engine
+# Autocomplete Engine
 
 A high-performance autocomplete engine using prefix-based trie with DFS algorithms and AST analysis, similar to VSCode IntelliSense. Supports multiple languages (Python, TypeScript, JavaScript) with context-aware suggestions.
 
